@@ -1,0 +1,742 @@
+import os
+import subprocess
+import sys
+
+def create_project():
+    print("🚀 Создание проекта Финансовый учет Битрикс24")
+    print("=" * 50)
+    
+    # Создаем структуру папок
+    folders = ["backend", "frontend", "database"]
+    for folder in folders:
+        os.makedirs(folder, exist_ok=True)
+        print(f"📁 Создана папка: {folder}")
+    
+    # ==================== BACKEND ====================
+    # Файл backend/main.py
+    with open("backend/main.py", "w", encoding="utf-8") as f:
+        f.write("""from fastapi import FastAPI, HTTPException
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import FileResponse, HTMLResponse
+from pydantic import BaseModel
+from typing import List, Optional, Dict
+from datetime import datetime
+import os
+import json
+import sqlite3
+from contextlib import contextmanager
+
+app = FastAPI(title="Финансовый учет Битрикс24")
+
+# CORS
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+# ============ БАЗА ДАННЫХ ============
+DB_PATH = "database/finance.db"
+
+@contextmanager
+def get_db():
+    conn = sqlite3.connect(DB_PATH)
+    conn.row_factory = sqlite3.Row
+    try:
+        yield conn
+    finally:
+        conn.close()
+
+def init_db():
+    with get_db() as conn:
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS projects (
+                id TEXT PRIMARY KEY,
+                name TEXT NOT NULL,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS transactions (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                project_id TEXT NOT NULL,
+                type TEXT NOT NULL,
+                category TEXT NOT NULL,
+                amount REAL NOT NULL,
+                description TEXT,
+                date TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                employee_id TEXT,
+                FOREIGN KEY (project_id) REFERENCES projects (id)
+            )
+        """)
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS categories (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                type TEXT NOT NULL,
+                name TEXT NOT NULL UNIQUE
+            )
+        """)
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS project_members (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                project_id TEXT NOT NULL,
+                user_id TEXT NOT NULL,
+                user_name TEXT NOT NULL,
+                FOREIGN KEY (project_id) REFERENCES projects (id)
+            )
+        """)
+        conn.commit()
+        
+        # Добавляем базовые категории
+        default_categories = [
+            ('income', 'Продажа'), ('income', 'Аванс'), ('income', 'Оплата услуг'), ('income', 'Другое'),
+            ('expense', 'Внешние программисты'), ('expense', 'Внутренние программисты'),
+            ('expense', 'Расходы на ИИ'), ('expense', 'Аренда сервера'),
+            ('expense', 'Дивиденды'), ('expense', 'Другое')
+        ]
+        for cat_type, cat_name in default_categories:
+            try:
+                conn.execute("INSERT INTO categories (type, name) VALUES (?, ?)", (cat_type, cat_name))
+            except:
+                pass
+        conn.commit()
+
+# Инициализируем БД
+init_db()
+
+# ============ МОДЕЛИ ============
+class TransactionCreate(BaseModel):
+    project_id: str
+    type: str
+    category: str
+    amount: float
+    description: Optional[str] = ""
+    employee_id: Optional[str] = None
+
+class ProjectCreate(BaseModel):
+    id: str
+    name: str
+
+class ProjectMemberCreate(BaseModel):
+    user_id: str
+    user_name: str
+
+# ============ РОУТЫ ============
+
+@app.get("/")
+async def root():
+    html_path = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "frontend", "index.html")
+    if os.path.exists(html_path):
+        return FileResponse(html_path)
+    return HTMLResponse(open("frontend/index.html", "r", encoding="utf-8").read() if os.path.exists("frontend/index.html") else "<h1>Создайте файл frontend/index.html</h1>")
+
+@app.get("/api/projects")
+async def get_projects():
+    with get_db() as conn:
+        # Получаем проекты
+        projects = conn.execute("SELECT * FROM projects").fetchall()
+        
+        # Если проектов нет, создаем демо
+        if not projects:
+            conn.execute("INSERT INTO projects (id, name) VALUES (?, ?)", ("demo_1", "Проект Альфа"))
+            conn.execute("INSERT INTO projects (id, name) VALUES (?, ?)", ("demo_2", "Проект Бета"))
+            conn.commit()
+            projects = conn.execute("SELECT * FROM projects").fetchall()
+            
+            # Добавляем демо-транзакции
+            demo_trans = [
+                ("demo_1", "income", "Продажа", 150000, "Оплата по договору"),
+                ("demo_1", "expense", "Внешние программисты", 45000, "Разработка модуля"),
+                ("demo_2", "expense", "Аренда сервера", 12000, "Аренда VPS"),
+            ]
+            for trans in demo_trans:
+                conn.execute("""
+                    INSERT INTO transactions (project_id, type, category, amount, description)
+                    VALUES (?, ?, ?, ?, ?)
+                """, trans)
+            conn.commit()
+        
+        result = []
+        for project in projects:
+            # Получаем транзакции проекта
+            transactions = conn.execute(
+                "SELECT * FROM transactions WHERE project_id = ?", (project["id"],)
+            ).fetchall()
+            
+            total_income = sum(t["amount"] for t in transactions if t["type"] == "income")
+            total_expenses = sum(t["amount"] for t in transactions if t["type"] == "expense")
+            profit = total_income - total_expenses
+            profitability = (profit / total_income * 100) if total_income > 0 else 0
+            
+            income_by_category = {}
+            expenses_by_category = {}
+            for t in transactions:
+                if t["type"] == "income":
+                    income_by_category[t["category"]] = income_by_category.get(t["category"], 0) + t["amount"]
+                else:
+                    expenses_by_category[t["category"]] = expenses_by_category.get(t["category"], 0) + t["amount"]
+            
+            # Получаем участников
+            members = conn.execute(
+                "SELECT * FROM project_members WHERE project_id = ?", (project["id"],)
+            ).fetchall()
+            
+            result.append({
+                "project_id": project["id"],
+                "project_name": project["name"],
+                "total_income": total_income,
+                "total_expenses": total_expenses,
+                "profit": profit,
+                "profitability": profitability,
+                "income_by_category": income_by_category,
+                "expenses_by_category": expenses_by_category,
+                "transactions": [dict(t) for t in transactions],
+                "members": [{"user_id": m["user_id"], "user_name": m["user_name"]} for m in members]
+            })
+        
+        return result
+
+@app.post("/api/transactions")
+async def add_transaction(transaction: TransactionCreate):
+    with get_db() as conn:
+        # Проверяем существование проекта
+        project = conn.execute("SELECT * FROM projects WHERE id = ?", (transaction.project_id,)).fetchone()
+        if not project:
+            raise HTTPException(status_code=404, detail="Проект не найден")
+        
+        cursor = conn.execute("""
+            INSERT INTO transactions (project_id, type, category, amount, description, employee_id)
+            VALUES (?, ?, ?, ?, ?, ?)
+        """, (transaction.project_id, transaction.type, transaction.category, 
+              transaction.amount, transaction.description, transaction.employee_id))
+        conn.commit()
+        
+        return {"id": cursor.lastrowid, "message": "Транзакция добавлена"}
+
+@app.get("/api/categories")
+async def get_categories():
+    with get_db() as conn:
+        categories = conn.execute("SELECT type, name FROM categories ORDER BY type, name").fetchall()
+        result = {"income": [], "expense": []}
+        for cat in categories:
+            result[cat["type"]].append(cat["name"])
+        return result
+
+@app.post("/api/categories")
+async def add_category(type: str, name: str):
+    with get_db() as conn:
+        try:
+            conn.execute("INSERT INTO categories (type, name) VALUES (?, ?)", (type, name))
+            conn.commit()
+            return {"message": f"Категория '{name}' добавлена"}
+        except:
+            raise HTTPException(status_code=400, detail="Категория уже существует")
+
+@app.post("/api/projects")
+async def create_project(project: ProjectCreate):
+    with get_db() as conn:
+        # Проверяем, не существует ли проект
+        existing = conn.execute("SELECT * FROM projects WHERE id = ?", (project.id,)).fetchone()
+        if existing:
+            raise HTTPException(status_code=400, detail="Проект с таким ID уже существует")
+        
+        conn.execute("INSERT INTO projects (id, name) VALUES (?, ?)", (project.id, project.name))
+        conn.commit()
+        return {"message": "Проект создан"}
+
+@app.post("/api/projects/{project_id}/members")
+async def add_member(project_id: str, member: ProjectMemberCreate):
+    with get_db() as conn:
+        project = conn.execute("SELECT * FROM projects WHERE id = ?", (project_id,)).fetchone()
+        if not project:
+            raise HTTPException(status_code=404, detail="Проект не найден")
+        
+        conn.execute("""
+            INSERT INTO project_members (project_id, user_id, user_name)
+            VALUES (?, ?, ?)
+        """, (project_id, member.user_id, member.user_name))
+        conn.commit()
+        return {"message": "Сотрудник добавлен"}
+
+@app.delete("/api/transactions/{transaction_id}")
+async def delete_transaction(transaction_id: int):
+    with get_db() as conn:
+        conn.execute("DELETE FROM transactions WHERE id = ?", (transaction_id,))
+        conn.commit()
+        return {"message": "Транзакция удалена"}
+
+@app.delete("/api/projects/{project_id}/members/{user_id}")
+async def remove_member(project_id: str, user_id: str):
+    with get_db() as conn:
+        conn.execute("DELETE FROM project_members WHERE project_id = ? AND user_id = ?", (project_id, user_id))
+        conn.commit()
+        return {"message": "Сотрудник удален"}
+
+if __name__ == "__main__":
+    import uvicorn
+    print("🚀 Сервер запущен на http://localhost:8000")
+    print("📊 Нажми Ctrl+C для остановки")
+    uvicorn.run(app, host="0.0.0.0", port=8000)
+""")
+    print("✅ Создан backend/main.py")
+
+    # ==================== FRONTEND ====================
+    with open("frontend/index.html", "w", encoding="utf-8") as f:
+        f.write("""<!DOCTYPE html>
+<html lang="ru">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Финансовый учет проектов Битрикс24</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; background: #f0f2f5; color: #333; line-height: 1.6; }
+        .container { max-width: 1400px; margin: 0 auto; padding: 20px; }
+        
+        header { background: white; padding: 20px 30px; border-radius: 12px; box-shadow: 0 2px 8px rgba(0,0,0,0.1); margin-bottom: 30px; display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; }
+        header h1 { font-size: 28px; color: #1a73e8; }
+        .auth-section button { padding: 10px 20px; background: #1a73e8; color: white; border: none; border-radius: 6px; cursor: pointer; font-size: 14px; transition: background 0.3s; }
+        .auth-section button:hover { background: #1557b0; }
+        
+        .controls { display: flex; gap: 15px; margin-bottom: 30px; flex-wrap: wrap; }
+        .btn-primary, .btn-success, .btn-secondary, .btn-danger {
+            padding: 12px 24px; border: none; border-radius: 8px; cursor: pointer; font-weight: 600; font-size: 14px;
+            transition: all 0.3s;
+        }
+        .btn-primary { background: #1a73e8; color: white; }
+        .btn-primary:hover { background: #1557b0; transform: translateY(-2px); }
+        .btn-success { background: #34a853; color: white; }
+        .btn-success:hover { background: #2d8f47; transform: translateY(-2px); }
+        .btn-secondary { background: #5f6368; color: white; }
+        .btn-secondary:hover { background: #4a4d51; transform: translateY(-2px); }
+        .btn-danger { background: #ea4335; color: white; }
+        .btn-danger:hover { background: #d33426; transform: translateY(-2px); }
+        
+        .projects-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(350px, 1fr)); gap: 25px; }
+        .project-card { background: white; border-radius: 12px; padding: 25px; box-shadow: 0 2px 8px rgba(0,0,0,0.08); transition: all 0.3s; cursor: pointer; }
+        .project-card:hover { transform: translateY(-4px); box-shadow: 0 4px 16px rgba(0,0,0,0.12); }
+        .project-card h3 { color: #1a73e8; margin-bottom: 15px; font-size: 20px; }
+        
+        .finance-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin: 15px 0; }
+        .finance-item { padding: 10px; background: #f8f9fa; border-radius: 6px; text-align: center; }
+        .finance-item .label { font-size: 12px; color: #5f6368; text-transform: uppercase; }
+        .finance-item .value { font-size: 20px; font-weight: 700; margin-top: 5px; }
+        .value.positive { color: #34a853; }
+        .value.negative { color: #ea4335; }
+        .value.profit { color: #1a73e8; }
+        
+        .categories-list { margin: 15px 0; font-size: 14px; display: flex; flex-wrap: wrap; gap: 8px; }
+        .categories-list span { padding: 4px 10px; border-radius: 20px; }
+        .income-cat { background: #e6f4ea; color: #1e7e34; }
+        .expense-cat { background: #fce8e6; color: #c62828; }
+        
+        .members-list { display: flex; flex-wrap: wrap; gap: 5px; margin-top: 10px; }
+        .member-tag { background: #e8f0fe; color: #1a73e8; padding: 4px 12px; border-radius: 20px; font-size: 12px; }
+        
+        .modal { display: none; position: fixed; z-index: 1000; left: 0; top: 0; width: 100%; height: 100%; background: rgba(0,0,0,0.5); animation: fadeIn 0.3s; }
+        .modal-content { background: white; margin: 5% auto; padding: 30px; width: 90%; max-width: 500px; border-radius: 12px; position: relative; max-height: 80vh; overflow-y: auto; }
+        @keyframes fadeIn { from { opacity: 0; transform: translateY(-20px); } to { opacity: 1; transform: translateY(0); } }
+        .close { position: absolute; right: 20px; top: 15px; font-size: 28px; font-weight: bold; cursor: pointer; color: #5f6368; }
+        .close:hover { color: #333; }
+        
+        .form-group { margin-bottom: 20px; }
+        .form-group label { display: block; margin-bottom: 5px; font-weight: 600; font-size: 14px; }
+        .form-group input, .form-group select { width: 100%; padding: 10px 12px; border: 1px solid #dadce0; border-radius: 6px; font-size: 14px; transition: border-color 0.3s; }
+        .form-group input:focus, .form-group select:focus { outline: none; border-color: #1a73e8; box-shadow: 0 0 0 3px rgba(26,115,232,0.1); }
+        
+        .loading { text-align: center; padding: 40px; color: #5f6368; font-size: 18px; grid-column: 1/-1; }
+        
+        @media (max-width: 768px) {
+            header { flex-direction: column; align-items: flex-start; gap: 15px; }
+            .controls { flex-direction: column; }
+            .controls button { width: 100%; }
+            .projects-grid { grid-template-columns: 1fr; }
+            .finance-grid { grid-template-columns: 1fr; }
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <header>
+            <h1>📊 Финансовый учет проектов</h1>
+            <div class="auth-section">
+                <button onclick="alert('Для интеграции с Битрикс24 настройте OAuth в .env')">🔑 Авторизация</button>
+            </div>
+        </header>
+
+        <main>
+            <div class="controls">
+                <button onclick="syncProjects()" class="btn-primary">🔄 Синхронизировать</button>
+                <button onclick="showAddTransaction()" class="btn-success">➕ Добавить транзакцию</button>
+                <button onclick="showAddCategory()" class="btn-secondary">📂 Добавить категорию</button>
+                <button onclick="showAddProject()" class="btn-primary">📁 Создать проект</button>
+            </div>
+
+            <div id="projectsList" class="projects-grid">
+                <div class="loading">⏳ Загрузка проектов...</div>
+            </div>
+
+            <!-- Модальное окно для транзакции -->
+            <div id="transactionModal" class="modal">
+                <div class="modal-content">
+                    <span class="close" onclick="closeModal('transactionModal')">&times;</span>
+                    <h2>➕ Добавить транзакцию</h2>
+                    <form id="transactionForm">
+                        <div class="form-group">
+                            <label>Проект:</label>
+                            <select id="transProjectId" required></select>
+                        </div>
+                        <div class="form-group">
+                            <label>Тип:</label>
+                            <select id="transType" onchange="updateCategories()" required>
+                                <option value="income">Доход</option>
+                                <option value="expense">Расход</option>
+                            </select>
+                        </div>
+                        <div class="form-group">
+                            <label>Категория:</label>
+                            <select id="transCategory" required></select>
+                        </div>
+                        <div class="form-group">
+                            <label>Сумма (₽):</label>
+                            <input type="number" id="transAmount" step="0.01" min="0.01" required>
+                        </div>
+                        <div class="form-group">
+                            <label>Описание:</label>
+                            <input type="text" id="transDescription" placeholder="Описание">
+                        </div>
+                        <button type="submit" class="btn-success">💾 Сохранить</button>
+                    </form>
+                </div>
+            </div>
+
+            <!-- Модальное окно для категории -->
+            <div id="categoryModal" class="modal">
+                <div class="modal-content">
+                    <span class="close" onclick="closeModal('categoryModal')">&times;</span>
+                    <h2>📂 Добавить категорию</h2>
+                    <form id="categoryForm">
+                        <div class="form-group">
+                            <label>Тип:</label>
+                            <select id="catType" required>
+                                <option value="income">Доход</option>
+                                <option value="expense">Расход</option>
+                            </select>
+                        </div>
+                        <div class="form-group">
+                            <label>Название:</label>
+                            <input type="text" id="catName" required placeholder="Например: Премиум-подписка">
+                        </div>
+                        <button type="submit" class="btn-success">➕ Добавить</button>
+                    </form>
+                </div>
+            </div>
+
+            <!-- Модальное окно для проекта -->
+            <div id="projectModal" class="modal">
+                <div class="modal-content">
+                    <span class="close" onclick="closeModal('projectModal')">&times;</span>
+                    <h2>📁 Создать проект</h2>
+                    <form id="projectForm">
+                        <div class="form-group">
+                            <label>ID проекта (уникальный):</label>
+                            <input type="text" id="projectId" required placeholder="project_001">
+                        </div>
+                        <div class="form-group">
+                            <label>Название:</label>
+                            <input type="text" id="projectName" required placeholder="Мой проект">
+                        </div>
+                        <button type="submit" class="btn-success">📁 Создать</button>
+                    </form>
+                </div>
+            </div>
+        </main>
+    </div>
+
+    <script>
+        let projects = [];
+        let categories = { income: [], expense: [] };
+        let users = [{ id: '1', name: 'Иван Иванов' }, { id: '2', name: 'Петр Петров' }];
+
+        document.addEventListener('DOMContentLoaded', function() {
+            document.getElementById('transactionForm').addEventListener('submit', function(e) {
+                e.preventDefault();
+                addTransaction();
+            });
+            document.getElementById('categoryForm').addEventListener('submit', function(e) {
+                e.preventDefault();
+                addCategory();
+            });
+            document.getElementById('projectForm').addEventListener('submit', function(e) {
+                e.preventDefault();
+                createProject();
+            });
+            loadCategories();
+            syncProjects();
+        });
+
+        async function syncProjects() {
+            try {
+                const response = await fetch('/api/projects');
+                if (!response.ok) throw new Error('Ошибка загрузки');
+                projects = await response.json();
+                renderProjects(projects);
+                updateProjectSelects();
+            } catch (error) {
+                document.getElementById('projectsList').innerHTML = 
+                    `<div class="loading">❌ Ошибка: ${error.message}</div>`;
+            }
+        }
+
+        function renderProjects(projects) {
+            const container = document.getElementById('projectsList');
+            if (!projects || projects.length === 0) {
+                container.innerHTML = '<div class="loading">📭 Нет проектов. Создайте новый!</div>';
+                return;
+            }
+            
+            container.innerHTML = projects.map(p => `
+                <div class="project-card" onclick="showDetails('${p.project_id}')">
+                    <h3>${p.project_name}</h3>
+                    <div class="finance-grid">
+                        <div class="finance-item"><div class="label">Доходы</div><div class="value positive">${formatCurrency(p.total_income)} ₽</div></div>
+                        <div class="finance-item"><div class="label">Расходы</div><div class="value negative">${formatCurrency(p.total_expenses)} ₽</div></div>
+                        <div class="finance-item"><div class="label">Прибыль</div><div class="value profit">${formatCurrency(p.profit)} ₽</div></div>
+                        <div class="finance-item"><div class="label">Рентабельность</div><div class="value ${p.profitability >= 0 ? 'positive' : 'negative'}">${p.profitability.toFixed(1)}%</div></div>
+                    </div>
+                    <div class="categories-list">
+                        ${Object.entries(p.income_by_category || {}).map(([cat, amount]) => 
+                            `<span class="income-cat">💰 ${cat}: ${formatCurrency(amount)} ₽</span>`
+                        ).join('')}
+                        ${Object.entries(p.expenses_by_category || {}).map(([cat, amount]) => 
+                            `<span class="expense-cat">💸 ${cat}: ${formatCurrency(amount)} ₽</span>`
+                        ).join('')}
+                    </div>
+                    <div class="members-list">
+                        ${(p.members || []).map(m => `<span class="member-tag">👤 ${m.user_name}</span>`).join('')}
+                    </div>
+                </div>
+            `).join('');
+        }
+
+        function formatCurrency(amount) {
+            return new Intl.NumberFormat('ru-RU', { minimumFractionDigits: 0, maximumFractionDigits: 2 }).format(amount);
+        }
+
+        function updateCategories() {
+            const type = document.getElementById('transType').value;
+            const select = document.getElementById('transCategory');
+            const cats = categories[type] || [];
+            select.innerHTML = '<option value="">Выберите категорию</option>';
+            cats.forEach(cat => {
+                select.innerHTML += `<option value="${cat}">${cat}</option>`;
+            });
+        }
+
+        function updateProjectSelects() {
+            const select = document.getElementById('transProjectId');
+            select.innerHTML = '<option value="">Выберите проект</option>';
+            projects.forEach(p => {
+                select.innerHTML += `<option value="${p.project_id}">${p.project_name}</option>`;
+            });
+        }
+
+        async function loadCategories() {
+            try {
+                const response = await fetch('/api/categories');
+                categories = await response.json();
+                updateCategories();
+            } catch (error) {
+                console.error('Ошибка загрузки категорий:', error);
+            }
+        }
+
+        async function addTransaction() {
+            const data = {
+                project_id: document.getElementById('transProjectId').value,
+                type: document.getElementById('transType').value,
+                category: document.getElementById('transCategory').value,
+                amount: parseFloat(document.getElementById('transAmount').value),
+                description: document.getElementById('transDescription').value,
+                employee_id: null
+            };
+            
+            if (!data.project_id || !data.category || !data.amount) {
+                alert('Заполните все обязательные поля');
+                return;
+            }
+
+            try {
+                const response = await fetch('/api/transactions', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(data)
+                });
+                if (!response.ok) throw new Error('Ошибка');
+                alert('✅ Транзакция добавлена!');
+                closeModal('transactionModal');
+                syncProjects();
+                document.getElementById('transactionForm').reset();
+            } catch (error) {
+                alert('❌ Ошибка: ' + error.message);
+            }
+        }
+
+        async function addCategory() {
+            const type = document.getElementById('catType').value;
+            const name = document.getElementById('catName').value.trim();
+            
+            if (!name) {
+                alert('Введите название категории');
+                return;
+            }
+
+            try {
+                const response = await fetch(`/api/categories?type=${type}&name=${encodeURIComponent(name)}`, {
+                    method: 'POST'
+                });
+                if (!response.ok) throw new Error('Категория уже существует');
+                alert('✅ Категория добавлена!');
+                closeModal('categoryModal');
+                loadCategories();
+                document.getElementById('catName').value = '';
+            } catch (error) {
+                alert('❌ ' + error.message);
+            }
+        }
+
+        async function createProject() {
+            const id = document.getElementById('projectId').value.trim();
+            const name = document.getElementById('projectName').value.trim();
+            
+            if (!id || !name) {
+                alert('Заполните все поля');
+                return;
+            }
+
+            try {
+                const response = await fetch('/api/projects', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ id, name })
+                });
+                if (!response.ok) throw new Error('Ошибка создания');
+                alert('✅ Проект создан!');
+                closeModal('projectModal');
+                syncProjects();
+                document.getElementById('projectForm').reset();
+            } catch (error) {
+                alert('❌ Ошибка: ' + error.message);
+            }
+        }
+
+        function showAddTransaction() {
+            updateProjectSelects();
+            updateCategories();
+            document.getElementById('transactionModal').style.display = 'block';
+        }
+
+        function showAddCategory() {
+            document.getElementById('categoryModal').style.display = 'block';
+        }
+
+        function showAddProject() {
+            document.getElementById('projectModal').style.display = 'block';
+        }
+
+        function closeModal(id) {
+            document.getElementById(id).style.display = 'none';
+        }
+
+        function showDetails(projectId) {
+            const project = projects.find(p => p.project_id === projectId);
+            if (!project) return;
+            
+            let msg = `📊 ${project.project_name}\n━━━━━━━━━━━━━━━━━━━━\n`;
+            msg += `💰 Доходы: ${formatCurrency(project.total_income)} ₽\n`;
+            msg += `💸 Расходы: ${formatCurrency(project.total_expenses)} ₽\n`;
+            msg += `📈 Прибыль: ${formatCurrency(project.profit)} ₽\n`;
+            msg += `📊 Рентабельность: ${project.profitability.toFixed(1)}%\n\n`;
+            msg += `📂 Доходы:\n`;
+            Object.entries(project.income_by_category || {}).forEach(([cat, amount]) => {
+                msg += `  • ${cat}: ${formatCurrency(amount)} ₽\n`;
+            });
+            msg += `\n📂 Расходы:\n`;
+            Object.entries(project.expenses_by_category || {}).forEach(([cat, amount]) => {
+                msg += `  • ${cat}: ${formatCurrency(amount)} ₽\n`;
+            });
+            alert(msg);
+        }
+
+        window.onclick = function(event) {
+            if (event.target.classList.contains('modal')) {
+                event.target.style.display = 'none';
+            }
+        }
+    </script>
+</body>
+</html>""")
+    print("✅ Создан frontend/index.html")
+
+    # ==================== REQUIREMENTS.TXT ====================
+    with open("requirements.txt", "w", encoding="utf-8") as f:
+        f.write("""fastapi==0.104.1
+uvicorn==0.24.0
+pydantic==2.5.0
+""")
+    print("✅ Создан requirements.txt")
+
+    # ==================== .ENV ====================
+    with open(".env", "w", encoding="utf-8") as f:
+        f.write("""# Настройки Битрикс24 (опционально)
+BITRIX24_DOMAIN=https://your-domain.bitrix24.ru
+BITRIX24_CLIENT_ID=local.XXXXXXXXXXXXXXXX
+BITRIX24_CLIENT_SECRET=XXXXXXXXXXXXXXXXXXXXX
+""")
+    print("✅ Создан .env")
+
+    # ==================== RUN.BAT ====================
+    with open("run.bat", "w", encoding="utf-8") as f:
+        f.write("""@echo off
+echo 🚀 Запуск Финансового учета Битрикс24
+echo ========================================
+echo.
+echo 📦 Установка зависимостей...
+pip install -r requirements.txt
+echo.
+echo 🚀 Запуск сервера...
+python backend/main.py
+pause
+""")
+    print("✅ Создан run.bat (для Windows)")
+
+    # ==================== RUN.SH ====================
+    with open("run.sh", "w", encoding="utf-8") as f:
+        f.write("""#!/bin/bash
+echo "🚀 Запуск Финансового учета Битрикс24"
+echo "========================================"
+echo ""
+echo "📦 Установка зависимостей..."
+pip3 install -r requirements.txt
+echo ""
+echo "🚀 Запуск сервера..."
+python3 backend/main.py
+""")
+    print("✅ Создан run.sh (для Mac/Linux)")
+
+    # ==================== README ====================
+    with open("README.md", "w", encoding="utf-8") as f:
+        f.write("""# Финансовый учет проектов Битрикс24
+
+## 🚀 Быстрый старт
+
+### Windows:
+Просто дважды кликни на файл `run.bat`
+
+### Mac/Linux:
+Открой терминал и выполни:
+```bash
+chmod +x run.sh
+./run.sh
